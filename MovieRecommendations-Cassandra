@@ -1,0 +1,226 @@
+!pip install cassandra-driver
+import pandas as pd
+import cassandra
+from cassandra.cluster import Cluster
+from cassandra.auth import PlainTextAuthProvider
+from matplotlib import pyplot as plt
+print(cassandra.__version__)
+
+!mkdir python_project
+!cd python_project
+!touch connect_database.py
+
+!python /content/python_project/connect_database.py
+
+rows = session.execute("select * from movielens.data_movies LIMIT 10")
+
+if rows:
+    for movie_row in rows:
+      print(movie_row[0], movie_row[1], movie_row[2])
+else:
+    print("An error occurred.")
+    
+rows = session.execute("SELECT count(userid) FROM data_ratings WHERE movieid=1584")
+
+if rows:
+    for ratings_row in rows:
+      print(ratings_row)
+else:
+    print("An error occurred.")
+# Answer = 5
+
+rows = session.execute("SELECT count(*) FROM data_users where gender = 'M' and age < 20 and age > 12 ALLOW FILTERING")
+
+if rows:
+    for users_row in rows:
+      print(users_row)
+else:
+    print("An error occurred.")
+# Answer = 805
+
+rows = session.execute("SELECT count(*) FROM data_ratings where rating=5 ALLOW FILTERING")
+if rows:
+    for ratings_row in rows:
+      print(ratings_row)
+else:
+    print("An error occurred.")
+# Answer 3232
+
+rows = session.execute("SELECT count(*) FROM data_movies where genres = 'Comedy' allow filtering")
+
+if rows:
+    for ratings_row in rows:
+      print(ratings_row)
+else:
+    print("An error occurred.")
+#Answer = 521
+
+from pandas.io.parsers.readers import read_csv
+
+result = []
+query = "SELECT movieid,genres,title FROM data_movies"
+rows = session.execute(query)
+for row in rows:
+    result.append([row[0], row[1], row[2]])
+df_movies = pd.DataFrame(result, columns=["MovieID", "Genre", "Title"])
+
+df_movies.groupby(['Genre']).count()
+
+from matplotlib import pyplot as plt
+import seaborn as sns
+
+fig = plt.figure(figsize=(50, 15))
+sns.histplot(x = 'Genre', data = df_movies, color = 'b' )
+plt.xlabel('Genre', fontsize = 12)
+plt.ylabel('Frequency')
+plt.title('Histogram of Genre')
+plt.xticks(rotation = 90,)
+plt.show()
+
+new = df_movies.Title.str.contains("LAssocie").any()
+new
+
+#s="400 Blows, The (Les Quatre cents coups) (1959)" "L'Associe1982"
+
+yr = []
+for s in df_movies['Title']:
+    yr.append(s.split()[-1].replace('(','').replace(')','').replace(r'[a-zA-Z]','').replace('\'','').strip(' \t\n\r'))
+df_movies['Year'] = yr
+df_movies.tail()
+
+df_movies.groupby(['Year']).count()
+
+fig = plt.figure(figsize=(50, 15))
+sns.histplot(x = 'Year', data = df_movies, color = 'b' )
+plt.xlabel('Year', fontsize = 12)
+plt.ylabel('Frequency')
+plt.title('Histogram of Year')
+plt.xticks(rotation = 90,)
+plt.show()
+
+result = []
+query = "SELECT userid,age,gender FROM data_users"
+rows = session.execute(query)
+for row in rows:
+    result.append([row[0], row[1], row[2]])
+df_users = pd.DataFrame(result, columns=["UserID", "Age", "Gender"])
+
+df_users.groupby(['Age']).count()
+
+fig = plt.figure(figsize=(15, 15))
+sns.histplot(x = 'Age', data = df_users, color = 'b' )
+plt.xlabel('Age', fontsize = 12)
+plt.ylabel('Frequency')
+plt.title('Histogram of Genre')
+plt.xticks(rotation = 90,)
+plt.show()
+
+result = []
+query = "SELECT movieid,rating,userid FROM data_ratings"
+rows = session.execute(query)
+for row in rows:
+    result.append([row[0], row[1], row[2]])
+df_rating = pd.DataFrame(result, columns=["MovieID", "Rating", "UserID"])
+df_rating.head()
+
+# Merging the movies, ratings dataframes
+df_movies_ratings = pd.merge(df_movies, df_rating, on='MovieID')
+
+df_movies_ratings_users = pd.merge(df_movies_ratings, df_users, on='UserID')
+
+# Workflow 1 : Using the Genre, Age and Gender, find other movies watched by people of same age and gender in this genre. 
+#              Select the top 5 based on AvgRating and closeness to year
+# Not using exact Year in query for Workflow 1 since in the same year, in same genre, multiple movies are not released
+# Instead, filter based on closeness to the year.
+
+#mid_query = movieId
+mid_query = 1097
+
+df_movies_partial_result = df_movies[df_movies.MovieID == mid_query]
+print(df_movies_partial_result)
+
+year_query = df_movies_partial_result.Year.astype(int).values[0]
+genre_query = df_movies_partial_result.Genre.values[0]
+title_query = df_movies_partial_result.Title.values[0]
+
+print("We're interested in movies of genre: ", genre_query, " year:", year_query)
+
+uid_query = 1749 # Assuming the viewer was logged in as userid 1749 while running this query
+df_users_partial_result = df_users[df_users.UserID == uid_query]
+print(df_users_partial_result, "\n")
+
+age_query = df_users_partial_result.Age.values[0]
+gender_query = df_users_partial_result.Gender.values[0]
+
+print("What did others of age: ", age_query, " and gender:", gender_query, " watch")
+
+# Calculate the time period (Distance from the year eg '70s, '80s, '90s)
+df_movies_ratings_users.Year = df_movies_ratings_users.Year.astype(int)
+df_movies_ratings_users['NearToYear'] = df_movies_ratings_users.Year - year_query
+df_movies_ratings_users.NearToYear = df_movies_ratings_users.NearToYear.abs()
+df_movies_ratings_users
+
+df_movies_ratings_users_partial_result = df_movies_ratings_users[(df_movies_ratings_users.Age == age_query) & (df_movies_ratings_users.Gender == gender_query) & (df_movies_ratings_users.Genre.str.contains(genre_query))]
+df_movies_ratings_users_partial_result
+
+# Taking the Average Rating in the relevant partial result set. i.e average of rating by similar users instead of taking average Rating of all users
+df_movies_ratings_users_partial_result['AvgRating'] = df_movies_ratings_users_partial_result['Rating'].groupby(df_movies_ratings_users_partial_result['MovieID']).transform('mean')
+df_movies_ratings_users_partial_result
+
+# Here, to recommend latest movies/new releases with relevance, we can descending sort by NearToYear
+df_movies_ratings_users_sorted_result = df_movies_ratings_users_partial_result.sort_values(['NearToYear','AvgRating'],ascending=[True,False])
+df_movies_ratings_users_sorted_result
+
+df_movies_ratings_users_sorted_result = df_movies_ratings_users_sorted_result.drop_duplicates(subset=['MovieID'])
+df_movies_ratings_users_sorted_result
+
+# Select top 5
+df_workflow_1_result = df_movies_ratings_users_sorted_result.head(5)
+print("Others like you watched: \n")
+df_workflow_1_result
+
+# Workflow 2
+df_movies_ratings_users_partial_result_wf2 = df_movies_ratings_users[(df_movies_ratings_users.Genre.str.contains(genre_query))]
+df_movies_ratings_users_partial_result_wf2
+
+# Taking the Average Rating in the relevant partial result set. i.e average of rating by all users (not necessarily similar users)
+df_movies_ratings_users_partial_result_wf2['AvgRating'] = df_movies_ratings_users_partial_result_wf2['Rating'].groupby(df_movies_ratings_users_partial_result_wf2['MovieID']).transform('mean')
+df_movies_ratings_users_partial_result_wf2
+
+# Count number of users who have watched a certain movie (viewership)
+df_movies_ratings_users_partial_result_wf2['NumUsers'] = df_movies_ratings_users_partial_result_wf2.groupby('MovieID')['MovieID'].transform('size')
+df_movies_ratings_users_partial_result_wf2
+
+df_movies_ratings_users_sorted_result_wf2 = df_movies_ratings_users_partial_result_wf2.sort_values(["NumUsers","AvgRating"],ascending=[False,False])
+df_movies_ratings_users_sorted_result_wf2
+
+df_movies_ratings_users_sorted_result_wf2 = df_movies_ratings_users_sorted_result_wf2.drop_duplicates(subset=['MovieID'])
+df_movies_ratings_users_sorted_result_wf2
+
+# Select top 5
+df_workflow_2_result = df_movies_ratings_users_sorted_result_wf2.head(5)
+print("Because you watched ", title_query, "\n")
+df_workflow_2_result
+
+# Workflow 3 
+df_movies_ratings_users_partial_result_wf3 = df_movies_ratings_users
+
+# Taking the Average Rating from all users (not necessarily similar users)
+df_movies_ratings_users_partial_result_wf3['AvgRating'] = df_movies_ratings_users_partial_result_wf3['Rating'].groupby(df_movies_ratings_users_partial_result_wf3['MovieID']).transform('mean')
+df_movies_ratings_users_partial_result_wf3
+
+# Count number of users who have watched a certain movie (viewership)
+df_movies_ratings_users_partial_result_wf3['NumUsers'] = df_movies_ratings_users_partial_result_wf3.groupby('MovieID')['MovieID'].transform('size')
+df_movies_ratings_users_partial_result_wf3
+
+# Here, to recommend latest movies/new releases "Now trending" with relevance, we can descending sort by NearToYear
+df_movies_ratings_users_sorted_result_wf3 = df_movies_ratings_users.sort_values(['NearToYear','NumUsers','AvgRating'],ascending=[True,False,False])
+df_movies_ratings_users_sorted_result_wf3
+
+df_movies_ratings_users_sorted_result_wf3 = df_movies_ratings_users_sorted_result_wf3.drop_duplicates(subset=['MovieID'])
+df_movies_ratings_users_sorted_result_wf3
+
+# Select top 5
+df_workflow_3_result = df_movies_ratings_users_sorted_result_wf3.head(5)
+print("Because you watched ", title_query, "\n")
+df_workflow_3_result
