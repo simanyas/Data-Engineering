@@ -1,0 +1,134 @@
+!pip -qq install pyspark
+!pip -qq install handyspark
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.regression import LinearRegression
+from pyspark.ml.feature import MinMaxScaler
+from handyspark import *
+import seaborn as sns
+from matplotlib import pyplot as plt
+
+spark = SparkSession.builder.appName('RealEstate').getOrCreate()
+
+csv_path = "/content/RealEstate.csv"
+df = spark.read.csv(csv_path, header=True, inferSchema = True)           # creating spark data frame
+
+# Print the Schema of the DataFrame
+df.printSchema()
+
+from pyspark.sql import functions as F
+DF = df.groupby('X1 transaction date').agg(F.count("X1 transaction date"))
+DF.show()
+
+from pyspark.sql.functions import col, min
+df.filter(col('X1 transaction date')>=2013).agg(avg('Y house price of unit area')).show() # 2013 Answer is 38.713194444444454
+
+from pyspark.sql.functions import col, min
+df.filter(col('X1 transaction date')<2013).agg(avg('Y house price of unit area')).show() # 2012 Answer is 36.304761904761904
+
+df.filter(df['X4 number of convenience stores'] == 0).show(10)
+
+from pyspark.sql.functions import col, min
+df.filter(col('X4 number of convenience stores')==0).agg(max('Y house price of unit area')).show() # Answer is 55.3
+
+df.filter(col('X4 number of convenience stores')>0).agg(max('Y house price of unit area')).show() # Answer is 117.5
+
+df.withColumn("Year",col("X1 transaction date").cast("Integer")).show(5)
+
+@udf(returnType=IntegerType())
+def extractMonth(transac_dt):
+  month = float(transac_dt) - int(transac_dt)
+  month  = round(month*12)
+  print(month)
+  return int(month)
+  
+  plt.figure(figsize= (20,10))
+df_p = df.toPandas()
+sns.histplot(data=df_p, x=df_p['Y house price of unit area'])
+
+plt.figure(figsize= (15,8))
+df_p = df.toPandas()
+sns.histplot(data=df_p, x=df_p['X2 house age'])
+
+plt.figure(figsize= (15,8))
+sns.countplot(x ='X1 transaction date', data = df_p)
+
+DF = df.groupby('X4 number of convenience stores').count().sort("count", ascending= False)
+DF.show(8)
+
+plt.figure(figsize= (24,4))
+x = DF.toPandas()['X4 number of convenience stores']
+y = DF.toPandas()['count']
+sns.barplot(x, y)
+plt.xticks(rotation= 90)
+plt.show()
+
+df_create = df.toDF("No","X1 transaction date", "X2 house age", "X3 distance to the nearest MRT station","X4 number of convenience stores","X5 latitude","X6 longitude",'Y house price of unit area')
+pandas_df = df_create.toPandas()
+pandas_df.head()
+
+plt.figure(figsize=(35, 15))
+sns.scatterplot(x=pandas_df["X5 latitude"], y=pandas_df["X6 longitude"],hue=pandas_df["Y house price of unit area"],sizes=(20, 200),size=pandas_df["Y house price of unit area"])
+
+plt.figure(figsize=(35, 15))
+plt.xticks(rotation=90)
+sns.boxplot(x="X2 house age", y="Y house price of unit area",data=pandas_df, palette="Set3")
+
+assembler1 = VectorAssembler(
+                            inputCols= ["X1 transaction date", "X2 house age", "X3 distance to the nearest MRT station","X4 number of convenience stores","X5 latitude","X6 longitude",'Y house price of unit area'],
+                            outputCol= "features")       # features is the name of output columns which combines all the columns
+                            
+corr_input = assembler1.transform(df).select("features")            # A new column 'features' will be created along with the existing columns
+                                            # features column will include all the values combined in one list
+                                            
+# correlation will be in Dense Matrix
+from pyspark.ml.stat import Correlation
+correlation = Correlation.corr(corr_input,"features","pearson").collect()[0][0]
+
+# To convert Dense Matrix into DataFrame
+rows = correlation.toArray().tolist()
+df_new = spark.createDataFrame(rows,["X1 transaction date", "X2 house age", "X3 distance to the nearest MRT station","X4 number of convenience stores","X5 latitude","X6 longitude",'Y house price of unit area'])
+df_new.show(10)
+
+df_create = df_new.toDF("X1 transaction date", "X2 house age", "X3 distance to the nearest MRT station","X4 number of convenience stores","X5 latitude","X6 longitude",'Y house price of unit area')
+pandas_df = df_create.toPandas()
+
+sns.heatmap(pandas_df,annot=True);
+
+from pyspark.ml.feature import MinMaxScaler
+from pyspark.ml import Pipeline
+
+assembler = VectorAssembler(
+                            inputCols= ["X1 transaction date", "X2 house age", "X3 distance to the nearest MRT station","X4 number of convenience stores","X5 latitude","X6 longitude"],
+                            outputCol= "features")       # features is the name of output columns which combines all the columns
+scaler = MinMaxScaler(inputCol="features", outputCol="features_scaled")
+pipeline = Pipeline(stages=[assembler, scaler])
+scalerModel = pipeline.fit(df)
+scaledData = scalerModel.transform(df)
+
+scaledData.show(10)
+
+scaledData.select("features_scaled").show(10, truncate= False)          # displays only the features_scaled column (which includes all other column values in a list)
+
+# Complete dataset is represented in 2 columns
+final_data = scaledData.select("features_scaled",'Y house price of unit area') 
+
+# Splitting the data in Train and Test set(70% training data, 30% testing data)
+train_data,test_data = final_data.randomSplit([0.7,0.3])
+
+regressor = LinearRegression(featuresCol="features_scaled", labelCol="Y house price of unit area")
+
+#Learn to fit the model from training set
+model = regressor.fit(train_data)
+
+predict = model.transform(test_data)
+
+predict.select(predict.columns[:]).show(10)
+
+metrics = model.evaluate(test_data)                             # Using evaluate method we can verify our model's performance
+
+print('Mean absolute error: {}'.format(metrics.meanAbsoluteError))
+print('Root mean squared error: {}'.format(metrics.rootMeanSquaredError))
+print('R_squared value: {}'.format(metrics.r2))
