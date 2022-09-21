@@ -1,0 +1,312 @@
+!pip -qq install pyspark
+!pip -qq install handyspark
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
+from handyspark import *
+import seaborn as sns
+from matplotlib import pyplot as plt
+import re
+import string
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.feature import CountVectorizer
+from pyspark.ml.classification import NaiveBayes
+from pyspark.sql.types import ArrayType, StringType
+import pandas as pd
+
+# NLTK imports
+import nltk
+nltk.download('punkt')
+# Download stopwords
+nltk.download('stopwords')
+nltk.download('wordnet')
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+
+spark = SparkSession.builder.appName('AirlineSentiment').getOrCreate()
+
+
+path = "/content/US_Airline_Tweets.csv"
+dataset = spark.read.csv(path,inferSchema=True,header=True)
+handy_data = dataset.toHandy()
+handy_data
+
+df = handy_data.cols[['tweet_id', 'airline_sentiment']][:5]
+
+dataset.select('airline_sentiment').groupby('airline_sentiment').agg(count('airline_sentiment')).show(50)
+
+df_sentiment = dataset.filter((col('airline_sentiment') == 'positive') | (col('airline_sentiment') == 'neutral') | (col('airline_sentiment') == 'negative')).groupby('airline_sentiment').agg(count('airline_sentiment'))
+
+df_sentiment.printSchema()
+
+pd_df_sentiment = df_sentiment.toPandas()
+
+sns.barplot(x="count(airline_sentiment)", y="airline_sentiment", data=pd_df_sentiment)
+dataset.select('airline').groupby('airline').agg(count('airline')).show()
+df_airline = dataset.filter((col('airline') == 'Virgin America') | (col('airline') == 'Delta') | (col('airline') == 'US Airways') | (col('airline') == 'Southwest') | (col('airline') == 'American') | (col('airline') == 'United')).groupby('airline').agg(count('airline'))
+
+pd_df_airline = df_airline.toPandas()
+sns.barplot(x="count(airline)", y="airline", data=pd_df_airline)
+
+df_sentiment = dataset.select("airline","airline_sentiment").filter((col('airline_sentiment') == 'positive') | (col('airline_sentiment') == 'neutral') | (col('airline_sentiment') == 'negative'))
+
+df_airline_sentiment = df_sentiment.filter((col('airline') == 'Virgin America') | (col('airline') == 'Delta') | (col('airline') == 'US Airways') | (col('airline') == 'Southwest') | (col('airline') == 'American') | (col('airline') == 'United'))
+
+df_airline_sentiment_count = df_airline_sentiment.groupby("airline","airline_sentiment").agg(count("*"))
+
+pd_df_airline_sentiment.plot(kind='bar', stacked=True)
+df_negative_reason = dataset.groupby('negativereason').agg(count('*'))
+
+pd_df_negative_reason = df_negative_reason.toPandas()
+plt.figure(figsize=(15, 30))
+sns.barplot(x="count(1)", y="negativereason", data=pd_df_negative_reason)
+
+df_sentiment = dataset.filter((col('airline_sentiment') == 'positive') | (col('airline_sentiment') == 'neutral') | (col('airline_sentiment') == 'negative'))
+
+df_airline = df_sentiment.filter((col('airline') == 'Virgin America') | (col('airline') == 'Delta') | (col('airline') == 'US Airways') | (col('airline') == 'Southwest') | (col('airline') == 'American') | (col('airline') == 'United'))
+
+pandas_full_df.drop(columns=['negativereason','airline_sentiment_gold','negativereason_confidence','negativereason_gold','tweet_coord','tweet_location','user_timezone'],inplace=True)
+
+pandas_full_df['text']=pandas_full_df['text'].str.lower()
+pandas_full_df['text']
+
+import re
+def cleanTweet(tweetText):
+    tweetText = re.sub("[^a-zA-Z]"," ", tweetText) # Replace non letters with spaces
+    tweetText = re.sub('http\S+\s*', ' ', tweetText)  # remove URLs
+    tweetText = re.sub('#\S+', '', tweetText)  # remove hashtags
+    tweetText = re.sub('@\S+', '  ', tweetText)  # remove mentions
+    tweetText = re.sub('[%s]' % re.escape("""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"""), ' ', tweetText)  # remove punctuations
+    #tweetText = re.sub(r'[^\x00-\x7f]',r' ', tweetText) 
+    tweetText = re.sub('\s+', ' ', tweetText)  # remove extra whitespace
+    return tweetText
+
+
+pandas_full_df['cleaned_tweet'] = pandas_full_df.text.apply(str).apply(lambda x: cleanTweet(x))
+
+pandas_full_df = pandas_full_df.drop(columns=['tweet_id','airline','name','tweet_created'])
+
+pandas_full_df['cleaned_tweet_tokenized'] = pandas_full_df.cleaned_tweet.apply(lambda x: word_tokenize(x))
+pandas_full_df.head()
+
+stop_words = set(stopwords.words('english'))
+print(stop_words)
+
+pandas_full_df['cleaned_tweet_tokenized_no_stopwords'] = pandas_full_df['cleaned_tweet_tokenized'].apply(lambda x: ' '.join([word for word in x if word not in stop_words]))
+
+lemmatizer = nltk.stem.WordNetLemmatizer()
+
+def lemmatize_text(text):
+    return lemmatizer.lemmatize(text)
+    
+nltk.download('omw-1.4')
+pandas_full_df['lemmatized'] = pandas_full_df.cleaned_tweet_tokenized_no_stopwords.apply(lemmatize_text)
+pandas_full_df['tweet_length'] = pandas_full_df.lemmatized.str.len()
+
+pandas_full_df['hashtags'] = pandas_full_df.text.str.count('#')
+pandas_full_df['mentions'] = pandas_full_df.text.str.count('@')
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+vectorizer = TfidfVectorizer(max_features = 1500)
+to_vectorize_text = pandas_full_df['lemmatized'].values
+vectorized_text = vectorizer.fit_transform(to_vectorize_text)
+
+def LabelEncoder(x):
+    if x == 'positive':
+        return 0
+    elif x == 'negative':
+        return 1
+    return 2
+
+pandas_full_df['airline_sentiment'] = pandas_full_df['airline_sentiment'].apply(LabelEncoder)
+
+y = pandas_full_df.airline_sentiment
+y
+
+pandas_full_df.drop(columns=['text','cleaned_tweet','cleaned_tweet_tokenized','cleaned_tweet_tokenized_no_stopwords','lemmatized'],inplace=True)
+
+X = pandas_full_df
+X.drop(columns=['airline_sentiment'],inplace=True)
+
+pd_df_tfidf = pd.DataFrame(vectorized_text.toarray(), columns=vectorizer.get_feature_names())
+
+pd_df_result = pd.concat([X, pd_df_tfidf], axis=1)
+
+pd_df_result = pd_df_result.astype(float)
+pd_df_result = pd_df_result.replace(np.nan, 0, regex=True)
+
+from sklearn.model_selection import train_test_split
+X_train,X_test,y_train,y_test = train_test_split(pd_df_result,y,random_state=0, test_size=0.2)
+
+from sklearn.naive_bayes import MultinomialNB
+clf = MultinomialNB()
+
+clf.fit(X_train, y_train)
+
+pred = clf.predict(X_test)
+
+print('Accuracy of NaiveBayes Classifier on training set: {:.2f}'.format(clf.score(X_train, y_train)))
+print('Accuracy of NaiveBayes Classifier on test set: {:.2f}'.format(clf.score(X_test, y_test)))
+from sklearn import metrics
+from sklearn.metrics import accuracy_score
+print("\n Classification report for classifier %s:\n%s\n" % (clf, metrics.classification_report(y_test, pred)))
+
+!pip install -qq streamlit
+
+%%writefile app.py
+import streamlit as st
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
+import re
+import string
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.feature import CountVectorizer
+from pyspark.ml.classification import NaiveBayes
+from pyspark.sql.types import ArrayType, StringType
+import nltk
+nltk.download('punkt')
+nltk.download('stopwords')
+nltk.download('wordnet')
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+import numpy as np
+import pandas as pd
+
+st.write("Creating a spark session")
+spark = SparkSession.builder.appName('TwitterSentiment').getOrCreate()
+dataset = spark.read.csv("/content/US_Airline_Tweets.csv",inferSchema=True,header=True)
+
+st.write("Preprocessing the train data")
+# 1. Data preprocessing (PASTE YOUR ENTIRE DATA PREPROCESSING CODE FROM ABOVE)
+df_sentiment = dataset.filter((col('airline_sentiment') == 'positive') | (col('airline_sentiment') == 'neutral') | (col('airline_sentiment') == 'negative'))
+
+df_airline = df_sentiment.filter((col('airline') == 'Virgin America') | (col('airline') == 'Delta') | (col('airline') == 'US Airways') | (col('airline') == 'Southwest') | (col('airline') == 'American') | (col('airline') == 'United'))
+
+pandas_full_df = df_airline.toPandas()
+
+pandas_full_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+pandas_full_df.drop(columns=['airline_sentiment_confidence','retweet_count','negativereason','airline_sentiment_gold','negativereason_confidence','negativereason_gold','tweet_coord','tweet_location','user_timezone'],inplace=True)
+
+pandas_full_df = pandas_full_df.fillna(0)
+
+pandas_full_df['text']=pandas_full_df['text'].str.lower()
+
+import re
+def cleanTweet(tweetText):
+    tweetText = re.sub("[^a-zA-Z]"," ", tweetText) # Replace non letters with spaces
+    tweetText = re.sub('http\S+\s*', ' ', tweetText)  # remove URLs
+    tweetText = re.sub('#\S+', '', tweetText)  # remove hashtags
+    tweetText = re.sub('@\S+', '  ', tweetText)  # remove mentions
+    tweetText = re.sub('[%s]' % re.escape("""!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"""), ' ', tweetText)  # remove punctuations
+    #tweetText = re.sub(r'[^\x00-\x7f]',r' ', tweetText) 
+    tweetText = re.sub('\s+', ' ', tweetText)  # remove extra whitespace
+    return tweetText
+
+pandas_full_df['cleaned_tweet'] = pandas_full_df.text.apply(str).apply(lambda x: cleanTweet(x))
+
+pandas_full_df = pandas_full_df.drop(columns=['tweet_id','airline','name','tweet_created'])
+
+
+st.write("Ongoing feature extraction!!")
+# 2. Feature Extraction (PASTE YOUR ENTIRE FEATURE EXTRACTION CODE FROM ABOVE)
+pandas_full_df['cleaned_tweet_tokenized'] = pandas_full_df.cleaned_tweet.apply(lambda x: word_tokenize(x))
+
+stop_words = set(stopwords.words('english'))
+
+pandas_full_df['cleaned_tweet_tokenized_no_stopwords'] = pandas_full_df['cleaned_tweet_tokenized'].apply(lambda x: ' '.join([word for word in x if word not in stop_words]))
+
+lemmatizer = nltk.stem.WordNetLemmatizer()
+
+def lemmatize_text(text):
+    return lemmatizer.lemmatize(text)
+
+nltk.download('omw-1.4')
+pandas_full_df['lemmatized'] = pandas_full_df.cleaned_tweet_tokenized_no_stopwords.apply(lemmatize_text)
+
+pandas_full_df['tweet_length'] = pandas_full_df.lemmatized.str.len()
+
+pandas_full_df['hashtags'] = pandas_full_df.text.str.count('#')
+
+pandas_full_df['mentions'] = pandas_full_df.text.str.count('@')
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+vectorizer = TfidfVectorizer(max_features = 1500)
+to_vectorize_text = pandas_full_df['lemmatized'].values
+vectorized_text = vectorizer.fit_transform(to_vectorize_text)
+
+def LabelEncoder(x):
+    if x == 'positive':
+        return 0
+    elif x == 'negative':
+        return 1
+    return 2
+
+pandas_full_df['airline_sentiment'] = pandas_full_df['airline_sentiment'].apply(LabelEncoder)
+y = pandas_full_df.airline_sentiment
+
+pandas_full_df.drop(columns=['airline_sentiment','text','cleaned_tweet','cleaned_tweet_tokenized','cleaned_tweet_tokenized_no_stopwords','lemmatized'],inplace=True)
+
+X = pandas_full_df
+
+pd_df_tfidf = pd.DataFrame(vectorized_text.toarray(), columns=vectorizer.get_feature_names())
+
+pd_df_result = pd.concat([X, pd_df_tfidf], axis=1)
+
+pd_df_result = pd_df_result.astype(float)
+pd_df_result = pd_df_result.replace(np.nan, 0, regex=True)
+
+st.write("Training the model")
+# 3. Training the model (PASTE YOUR MODEL TRAINING CODE FROM ABOVE)
+from sklearn.model_selection import train_test_split
+X_train,X_test,y_train,y_test = train_test_split(pd_df_result,y,random_state=0, test_size=0.01)
+
+from sklearn.naive_bayes import MultinomialNB
+clf = MultinomialNB()
+
+clf.fit(X_train, y_train)
+
+st.write("X_train = \n", X_train.head())
+def predict_users_Input(user_input):
+  df1 = spark.createDataFrame([ (1, user_input)],['Id', 'UserTweet'])
+
+  # YOUR CODE HERE for data preprocessing and feature extraction for user input data
+  pandas_user_df = df1.toPandas()
+  pandas_user_df['UserTweet'] = pandas_user_df['UserTweet'].str.lower()
+  pandas_user_df['cleaned_tweet'] = pandas_user_df.UserTweet.apply(str).apply(lambda x: cleanTweet(x))
+  pandas_user_df = pandas_user_df.drop(columns=['Id'])
+  pandas_user_df['cleaned_tweet_tokenized'] = pandas_user_df.cleaned_tweet.apply(lambda x: word_tokenize(x))
+  pandas_user_df['cleaned_tweet_tokenized_no_stopwords'] = pandas_user_df['cleaned_tweet_tokenized'].apply(lambda x: ' '.join([word for word in x if word not in stop_words]))
+  pandas_user_df['lemmatized'] = pandas_user_df.cleaned_tweet_tokenized_no_stopwords.apply(lemmatize_text)
+  pandas_user_df['tweet_length'] = pandas_user_df.lemmatized.str.len()
+  pandas_user_df['hashtags'] = pandas_user_df.UserTweet.str.count('#')
+  pandas_user_df['mentions'] = pandas_user_df.UserTweet.str.count('@')
+  #vectorizer2 = TfidfVectorizer(max_features = 1500)
+  to_vectorize_text2 = pandas_user_df['lemmatized'].values
+  vectorized_text2 = vectorizer.transform(to_vectorize_text)
+  pandas_user_df.drop(columns=['UserTweet','cleaned_tweet','cleaned_tweet_tokenized','cleaned_tweet_tokenized_no_stopwords','lemmatized'],inplace=True)
+  pd_df_tfidf_user = pd.DataFrame(vectorized_text2.toarray(), columns=vectorizer.get_feature_names())
+  pandas_user_result = pd.concat([pandas_user_df, pd_df_tfidf_user], axis=1)
+  pandas_user_result = pandas_user_result.astype(float)
+  pandas_user_result = pandas_user_result.replace(np.nan, 0, regex=True)
+  st.write("pandas_user_result = \n", pandas_user_result.head())
+  # YOUR CODE HERE for predicting the user input vector using trained model
+  predicted_result = pd.DataFrame()
+  predicted_result['prediction'] = clf.predict(pd_df_result.iloc[[0]])
+  st.write("predicted_result = \n", predicted_result)
+  return predicted_result # return dataframe object
+
+def decode(label):
+  if label == 0:
+    return "Positive Tweet!"
+  elif label == 1:
+    return "Negative Tweet!"
+  return "Neutral Tweet"
+
+user_input = st.text_input("Take Input","@mention #Hashtag good something!")
+#user_input = "@United #worstexperience Worst flight ever! Never fly United!"
+if st.button('predict'):
+    result = predict_users_Input(user_input)
+    st.write(decode(result.prediction.values[0]))
