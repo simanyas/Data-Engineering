@@ -1,0 +1,108 @@
+!pip -qq install pyspark
+
+from pyspark.sql import SparkSession
+from pyspark.sql import SQLContext
+from pyspark.sql.functions import *
+from pyspark.mllib.stat import Statistics 
+import seaborn as sns
+from matplotlib import pyplot as plt
+import numpy as np
+import pandas as pd
+from operator import add
+
+# Start spark session
+spark = SparkSession.builder.appName('networkdata').getOrCreate()
+spark
+
+sc = spark.sparkContext
+filePath = "/content/kddcup.data_10_percent.gz"
+rdd = sc.textFile(filePath)
+
+rdd.saveAsTextFile('/content/kddcup_data_3.csv')
+dataset = spark.read.csv("/content/kddcup_data_3.csv",header=False)
+df = dataset.toDF("duration", "protocol_type", "service", "flag", "src_bytes", "dst_bytes", "land", "wrong_fragment", "urgent", "hot", "num_failed_logins", "logged_in", "num_compromised", "root_shell", "su_attempted", "num_root", "num_file_creations", "num_shells", "num_access_files", "num_outbound_cmds", "is_host_login", "is_guest_login", "count", "srv_count", "serror_rate", "srv_serror_rate", "rerror_rate", "srv_rerror_rate", "same_srv_rate", "diff_srv_rate", "srv_diff_host_rate", "dst_host_count", "dst_host_srv_count", "dst_host_same_srv_rate", "dst_host_diff_srv_rate", "dst_host_same_src_port_rate", "dst_host_srv_diff_host_rate", "dst_host_serror_rate", "dst_host_srv_serror_rate", "dst_host_rerror_rate", "dst_host_srv_rerror_rate","category")
+df.printSchema()
+
+df.filter(col('category').contains('normal')).count()
+df.where(~col('category').contains('normal')).count()
+df.where(~col('category').contains('normal')).show()
+
+rdd1 = sc.parallelize(df.select('protocol_type').distinct().collect())
+rdd1
+
+rdd2 = sc.parallelize(df.select('service').distinct().collect())
+rdd2
+rdd1.cartesian(rdd2).collect()
+
+from pyspark.sql.types import IntegerType
+df = df.withColumn("duration", df["duration"].cast(IntegerType()))
+
+df.filter(col('category').contains('normal')).agg(avg('duration')).show()
+
+df.where(~col('category').contains('normal')).agg(avg('duration')).show()
+
+df_intrusion = df.where(~col('category').contains('normal'))
+
+rdd4 = sc.parallelize(df_intrusion.select('category','duration').collect())
+rdd4
+
+# Apply reduceByKey() operation on Rdd
+rdd_reduced = rdd4.reduceByKey(lambda x, y: x + y)
+
+# Iterate over the result and print the output
+for num in rdd_reduced.collect():
+  print("Key {} has {} Duration".format(num[0], num[1]))
+  
+df3 = dataset.toDF("duration", "protocol_type", "service", "flag", "src_bytes", "dst_bytes", "land", "wrong_fragment", "urgent", "hot", "num_failed_logins", "logged_in", "num_compromised", "root_shell", "su_attempted", "num_root", "num_file_creations", "num_shells", "num_access_files", "num_outbound_cmds", "is_host_login", "is_guest_login", "count", "srv_count", "serror_rate", "srv_serror_rate", "rerror_rate", "srv_rerror_rate", "same_srv_rate", "diff_srv_rate", "srv_diff_host_rate", "dst_host_count", "dst_host_srv_count", "dst_host_same_srv_rate", "dst_host_diff_srv_rate", "dst_host_same_src_port_rate", "dst_host_srv_diff_host_rate", "dst_host_serror_rate", "dst_host_srv_serror_rate", "dst_host_rerror_rate", "dst_host_srv_rerror_rate","category")
+df.printSchema()
+
+df.select('protocol_type').groupby('protocol_type').agg(count('protocol_type')).show()
+
+df.registerTempTable("networkData")
+df_intrusion.registerTempTable("intrusion_data")
+
+result = spark.sql('select * from networkData limit 10')
+result.show(10)
+
+result = spark.sql('select count(distinct(networkData.category)) from networkData')
+result.show()
+
+result = spark.sql('select category, count(*) from networkData group by category')
+result.show(50)
+
+result = spark.sql('select protocol_type, count(*) from intrusion_data group by protocol_type')
+result.show()
+
+result = spark.sql('select protocol_type, count(*) from networkData where duration > 1000 and dst_bytes = 0 group by protocol_type')
+result.show()
+
+# Dropping non integer columns
+# eliminating names of columns having string type
+
+df_numeric = df.drop("protocol_type","service","flag","category")
+
+df_numeric.select(*(col(c).cast("float").alias(c) for c in df_numeric.columns))
+
+# creating a dataframe with correlation matrix
+pd_df = df_numeric.toPandas()
+
+#  fill the null values with 0
+pd_df.fillna(0)
+pd_df=pd_df.apply(lambda x: pd.to_numeric(x, errors='ignore'))
+
+plt.figure(figsize = (20,20))
+sns.heatmap(pd_df.corr(),annot=True)
+
+# Analysis using serror_rate and rerror_rate as the features indicating intrusion_type. Creating scatter plot for normal and intrusion traffic
+
+df_analysis = df[['serror_rate','rerror_rate','category']]
+
+pd_df_analysis = df_analysis.toPandas()
+
+pd_df_analysis.serror_rate = pd_df_analysis.serror_rate.astype(float)
+pd_df_analysis.rerror_rate = pd_df_analysis.rerror_rate.astype(float)
+
+
+pd_df_analysis.category = pd_df_analysis.category.apply(lambda x: 'intrusion' if 'normal' not in x else x)
+
+sns.scatterplot(data=pd_df_analysis, x="serror_rate", y="rerror_rate", hue="category")
